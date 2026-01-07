@@ -3,14 +3,15 @@
 按照规范文档8.2节实现熵解码功能
 """
 
-from typing import List
-from bitstream.bit_reader import BitReader
+from typing import List, Dict, Any, Optional
+from copy import deepcopy
 from bitstream.descriptors import read_f
-
-
-# 规范文档中定义的常量
-EC_PROB_SHIFT = 6  # 规范文档中定义
-EC_MIN_PROB = 4    # 规范文档中定义
+from constants import EC_MIN_PROB, EC_PROB_SHIFT, FRAME_LF_COUNT, INT16_MAX, MV_CONTEXTS, NONE, NUM_REF_FRAMES
+import constants
+from entropy import default_cdfs
+from obu.decoder import AV1Decoder
+from bitstream.bit_reader import BitReader
+from utils.math_utils import FloorLog2
 
 
 class SymbolDecoder:
@@ -18,294 +19,235 @@ class SymbolDecoder:
     符号解码器
     实现规范文档8.2节描述的符号解码功能
     """
-    
-    def __init__(self, reader: BitReader):
+
+    def __init__(self):
         """
         初始化符号解码器
-        
-        Args:
-            reader: BitReader实例
         """
-        self.reader = reader
         self.SymbolValue = 0
         self.SymbolRange = 0
         self.SymbolMaxBits = 0
-    
-    def init_symbol(self, sz: int):
+
+        self.tile_cdfs: Dict[str, Any] = {}
+        self.saved_cdfs: Dict[str, Any] = {}
+        self.reader: BitReader = NONE
+
+    def init_symbol(self, av1: AV1Decoder, sz: int):
         """
         初始化符号解码器
-        规范文档 8.2.2 initialization_process_for_symbol_decoder()
-        
+        规范文档 8.2.2 Initialization process for symbol decoder
+
         Args:
             sz: 要读取的字节数
         """
-        # numBits = Min(sz * 8, 15)
+        self.reader = BitReader(av1.reader.read_bytes(sz))
+        reader = self.reader
+        ref_frame_store = av1.ref_frame_store
+
+        # Note: The bit position will always be byte aligned when init_symbol is invoked because the uncompressed header and the data partitions are always a whole number of bytes long.
+        assert reader.get_position() % 8 == 0
+
         numBits = min(sz * 8, 15)
-        
-        # buf = f(numBits)
-        buf = read_f(self.reader, numBits)
-        
-        # paddedBuf = buf << (15 - numBits)
+        buf = read_f(reader, numBits)
         paddedBuf = buf << (15 - numBits)
-        
-        # SymbolValue = ((1 << 15) - 1) ^ paddedBuf
-        self.SymbolValue = ((1 << 15) - 1) ^ paddedBuf
-        
-        # SymbolRange = 1 << 15
+        self.SymbolValue = INT16_MAX ^ paddedBuf
         self.SymbolRange = 1 << 15
-        
-        # SymbolMaxBits = 8 * sz - 15
         self.SymbolMaxBits = 8 * sz - 15
-    
-    def read_bool(self) -> int:
+
+        # Note: Implementations may prefer to store the inverse cdf to move the subtraction out of this loop.
+        cdf = deepcopy(default_cdfs.Default_Intra_Frame_Y_Mode_Cdf)
+        self.tile_cdfs['TileIntraFrameYModeCdf'] = inverseCdf(cdf)
+
+        for name, cdf in ref_frame_store.cdfs.items():
+            self.tile_cdfs[f'Tile{name}'] = deepcopy(cdf)
+
+    def read_bool(self, av1: AV1Decoder) -> int:
         """
         读取布尔值
-        规范文档 8.2.3 boolean_decoding_process()
-        
+        规范文档 8.2.3 Boolean decoding process
+
         Returns:
             解码的布尔值（0或1）
         """
-        # 构造CDF数组
+
+        # Note: Implementations may prefer to store the inverse cdf to move the subtraction out of this loop.
         cdf = [1 << 14, 1 << 15, 0]
-        
-        # 调用read_symbol，但不更新CDF（因为每次调用read_bool都重新构造CDF）
-        symbol = self.read_symbol(cdf, update_cdf=False)
-        
+        inverseCdf(cdf)
+
+        symbol = self.read_symbol(av1, cdf, update_cdf=False)
         return symbol
-    
-    def read_literal(self, n: int) -> int:
+
+    def exit_symbol(self, av1: AV1Decoder):
+        """
+        退出符号解码器
+        规范文档 8.2.4 Exit process for symbol decoder
+
+        """
+        reader = self.reader
+        frame_header = av1.frame_header
+        ref_frame_store = av1.ref_frame_store
+
+        # It is a requirement of bitstream conformance that SymbolMaxBits is greater than or equal to -14 whenever this process is invoked.
+        assert self.SymbolMaxBits >= -14
+
+        trailingBitPosition = reader.get_position() - min(15, self.SymbolMaxBits + 15)
+        reader.set_offset(max(0, self.SymbolMaxBits))
+        paddingEndPosition = reader.get_position()
+
+        # Note: paddingEndPosition will always be a multiple of 8 indicating that the bit position is byte aligned.
+        assert paddingEndPosition % 8 == 0
+
+        # It is a requirement of bitstream conformance that the bit at position trailingBitPosition is equal to 1.
+        reader.set_position(trailingBitPosition)
+        assert read_f(reader, 1) == 1
+
+        # It is a requirement of bitstream conformance that the bit at position x is equal to 0 for values of x strictly between trailingBitPosition and paddingEndPosition.
+        if reader.get_position() < paddingEndPosition:
+            assert read_f(reader, 1) == 0
+
+        if frame_header.disable_frame_end_update_cdf == 0 and frame_header.TileNum == frame_header.context_update_tile_id:
+            for name, cdf in self.tile_cdfs.items():
+                # 将Tile前缀名称转换为Saved前缀名称
+                saved_name = 'Saved' + name[4:]
+                self.saved_cdfs[saved_name] = cdf
+
+    def read_literal(self, av1: AV1Decoder, n: int) -> int:
         """
         读取字面量
         规范文档 8.2.5 parsing_process_for_read_literal()
-        
+
         Args:
             n: 要读取的位数
-            
+
         Returns:
             解码的n位无符号整数
         """
         x = 0
         for i in range(n):
-            x = 2 * x + self.read_bool()
+            x = 2 * x + self.read_bool(av1)
         return x
-    
-    def read_symbol(self, cdf: List[int], update_cdf: bool = True) -> int:
+
+    def read_symbol(self, av1: AV1Decoder, cdf: List[int], update_cdf: bool = True) -> int:
         """
         读取符号
-        规范文档 8.2.4 symbol_decoding_process()
-        
+        规范文档 8.2.6 Symbol decoding process
+
         Args:
             cdf: 累积分布函数数组（长度为N+1，N为符号数量）
-            update_cdf: 是否更新CDF（默认True）
-            
+            update_cdf: 是否更新CDF（默认True，但会被disable_cdf_update覆盖）
+
         Returns:
             解码的符号值
         """
-        N = len(cdf) - 1  # 符号数量
-        
-        # cur, prev, symbol计算
+        reader = self.reader
+        frame_header = av1.frame_header
+        N = len(cdf) - 1
+
+        """
+        Note: When this process is invoked, N will be greater than 1 and cdf[ N-1 ] will be equal to 1 << 15.
+        Note: Implementations may prefer to store the inverse cdf to move the subtraction out of this loop.
+        """
+        # assert N > 1 and cdf[N - 1] == 1 << 15
+        assert N > 1 and cdf[N - 1] == inverseCdf(1 << 15)
+
         cur = self.SymbolRange
         symbol = -1
-        
-        # 查找符号
+
         while True:
             symbol += 1
             prev = cur
-            
-            # f = (1 << 15) - cdf[symbol]
-            f = (1 << 15) - cdf[symbol]
-            
-            # cur = ((SymbolRange >> 8) * (f >> EC_PROB_SHIFT)) >> (7 - EC_PROB_SHIFT)
-            cur = ((self.SymbolRange >> 8) * (f >> EC_PROB_SHIFT)) >> (7 - EC_PROB_SHIFT)
-            
-            # cur += EC_MIN_PROB * (N - symbol - 1)
-            cur += EC_MIN_PROB * (N - symbol - 1)
-            
-            if self.SymbolValue < cur:
-                break
-        
-        # SymbolRange = prev - cur
-        self.SymbolRange = prev - cur
-        
-        # SymbolValue = SymbolValue - cur
-        self.SymbolValue -= cur
-        
-        # 重归一化
-        self._renormalize()
-        
-        # CDF更新
-        if update_cdf:
-            self._update_cdf(cdf, symbol)
-        
-        return symbol
-    
-    def _renormalize(self):
-        """
-        重归一化
-        规范文档 8.2.4中描述的重归一化步骤
-        """
-        # bits = 15 - FloorLog2(SymbolRange)
-        bits = 15 - self._floor_log2(self.SymbolRange)
-        
-        # SymbolRange = SymbolRange << bits
-        self.SymbolRange <<= bits
-        
-        # numBits = Min(bits, Max(0, SymbolMaxBits))
-        numBits = min(bits, max(0, self.SymbolMaxBits))
-        
-        # newData = f(numBits)
-        newData = read_f(self.reader, numBits) if numBits > 0 else 0
-        
-        # paddedData = newData << (bits - numBits)
-        paddedData = newData << (bits - numBits)
-        
-        # SymbolValue = paddedData ^ (((SymbolValue + 1) << bits) - 1)
-        self.SymbolValue = paddedData ^ (((self.SymbolValue + 1) << bits) - 1)
-        
-        # SymbolMaxBits = SymbolMaxBits - bits
-        self.SymbolMaxBits -= bits
-    
-    def _update_cdf(self, cdf: List[int], symbol: int):
-        """
-        更新CDF
-        规范文档 8.2.4中描述的CDF更新过程
-        
-        Args:
-            cdf: CDF数组（会被修改）
-            symbol: 解码的符号值
-        """
-        N = len(cdf) - 1
-        
-        # rate计算
-        rate = (3 + 
-                (1 if cdf[N] > 15 else 0) +
-                (1 if cdf[N] > 31 else 0) +
-                min(self._floor_log2(N), 2))
-        
-        tmp = 0
-        for i in range(N - 1):
-            if i == symbol:
-                tmp = 1 << 15
-            
-            if tmp < cdf[i]:
-                cdf[i] -= ((cdf[i] - tmp) >> rate)
+
+            # Note: Implementations may prefer to store the inverse cdf to move the subtraction out of this loop.
+            if cdf[N - 1] == 1 << 15:
+                f = (1 << 15) - cdf[symbol]
             else:
-                cdf[i] += ((tmp - cdf[i]) >> rate)
-        
-        # cdf[N] += (cdf[N] < 32)
-        if cdf[N] < 32:
-            cdf[N] += 1
-    
-    def exit_symbol(self):
-        """
-        退出符号解码器
-        规范文档 8.2.4 exit_process_for_symbol_decoder()
-        """
-        # trailingBitPosition = get_position() - Min(15, SymbolMaxBits + 15)
-        current_pos = self.reader.get_position()
-        trailingBitPosition = current_pos - min(15, self.SymbolMaxBits + 15)
-        
-        # 跳过剩余的位
-        # bitstream position indicator is advanced by Max(0, SymbolMaxBits)
-        bits_to_skip = max(0, self.SymbolMaxBits)
-        if bits_to_skip > 0:
-            self.reader.read_bits(bits_to_skip)
-        
-        # paddingEndPosition = get_position()
-        paddingEndPosition = self.reader.get_position()
-        
-        # 规范要求trailingBitPosition位置必须是1，之后到paddingEndPosition必须是0
-        # 但按照用户要求，不做异常判断
-    
-    def _floor_log2(self, x: int) -> int:
-        """
-        计算FloorLog2(x)
-        
-        Args:
-            x: 输入值
-            
-        Returns:
-            FloorLog2(x)的值
-        """
-        if x <= 0:
-            return 0
-        
-        result = 0
-        while x > 1:
-            x >>= 1
-            result += 1
-        return result
+                f = cdf[symbol]
+
+            cur = ((self.SymbolRange >> 8) *
+                   (f >> EC_PROB_SHIFT)) >> (7 - EC_PROB_SHIFT)
+            cur += EC_MIN_PROB * (N - symbol - 1)
+
+            if not (self.SymbolValue < cur):
+                break
+
+        self.SymbolRange = prev - cur
+        self.SymbolValue -= cur
+
+        # 1.
+        bits = 15 - FloorLog2(self.SymbolRange)
+        if bits != 0:
+            # 2.
+            self.SymbolRange <<= bits
+
+            # 3.
+            numBits = min(bits, max(0, self.SymbolMaxBits))
+
+            # 4.
+            newData = read_f(reader, numBits)
+
+            # 5.
+            paddedData = newData << (bits - numBits)
+
+            # 6.
+            self.SymbolValue = paddedData ^ (
+                ((self.SymbolValue + 1) << bits) - 1)
+
+            # 7.
+            self.SymbolMaxBits -= bits
+
+        if av1.on_symbol is not None:
+            av1.on_symbol([self.SymbolRange])
+
+        if update_cdf and frame_header.disable_cdf_update == 0:
+            rate = (3 +
+                    (cdf[N] > 15) +
+                    (cdf[N] > 31) +
+                    min(FloorLog2(N), 2))
+
+            tmp = inverseCdf(0)
+            for i in range(N - 1):
+                # Note: Implementations may prefer to store the inverse cdf to move the subtraction out of this loop.
+                if i == symbol:
+                    tmp = inverseCdf(1 << 15)
+
+                if tmp < cdf[i]:
+                    cdf[i] -= ((cdf[i] - tmp) >> rate)
+                else:
+                    cdf[i] += ((tmp - cdf[i]) >> rate)
+
+            cdf[N] += cdf[N] < 32
+
+            if av1.on_cdf is not None:
+                av1.on_cdf(cdf)
+
+        return symbol
 
 
-# 全局函数，按照规范文档命名
-def init_symbol(reader: BitReader, sz: int) -> SymbolDecoder:
+def inverseCdf(cdfs: Any) -> Any:
+    # return cdfs
+    if type(cdfs) == int:
+        return 32768 - cdfs
+    if type(cdfs[-1]) == int:
+        for i in range(len(cdfs)):
+            if i != len(cdfs) - 1:
+                cdfs[i] = 32768 - cdfs[i]
+        return cdfs
+    for cdf in cdfs:
+        inverseCdf(cdf)
+    return cdfs
+
+
+def save_cdfs(av1: AV1Decoder, ctx: int):
     """
-    初始化符号解码器
-    规范文档中定义的函数
-    
+    保存CDF数组
+    规范文档 7.20 save_cdfs()
+
+    将当前的所有CDF数组（在init_coeff_cdfs和init_non_coeff_cdfs中提到的）
+    保存到参考帧上下文ctx的存储区域。
+
     Args:
-        reader: BitReader实例
-        sz: 字节数
-        
-    Returns:
-        SymbolDecoder实例
+        ctx: 上下文索引（参考帧索引，范围0到NUM_REF_FRAMES-1）
     """
-    decoder = SymbolDecoder(reader)
-    decoder.init_symbol(sz)
-    return decoder
+    ref_frame_store = av1.ref_frame_store
 
-
-def read_bool(decoder: SymbolDecoder) -> int:
-    """
-    读取布尔值
-    规范文档中定义的函数
-    
-    Args:
-        decoder: SymbolDecoder实例
-        
-    Returns:
-        布尔值（0或1）
-    """
-    return decoder.read_bool()
-
-
-def read_literal(decoder: SymbolDecoder, n: int) -> int:
-    """
-    读取字面量
-    规范文档中定义的函数
-    
-    Args:
-        decoder: SymbolDecoder实例
-        n: 位数
-        
-    Returns:
-        n位无符号整数
-    """
-    return decoder.read_literal(n)
-
-
-def read_symbol(decoder: SymbolDecoder, cdf: List[int]) -> int:
-    """
-    读取符号
-    规范文档中定义的函数
-    
-    Args:
-        decoder: SymbolDecoder实例
-        cdf: CDF数组
-        
-    Returns:
-        解码的符号值
-    """
-    return decoder.read_symbol(cdf)
-
-
-def exit_symbol(decoder: SymbolDecoder):
-    """
-    退出符号解码器
-    规范文档中定义的函数
-    
-    Args:
-        decoder: SymbolDecoder实例
-    """
-    decoder.exit_symbol()
-
+    ref_frame_store.SavedCdfs[ctx] = deepcopy(ref_frame_store.cdfs)

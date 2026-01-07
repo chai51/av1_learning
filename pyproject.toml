@@ -1,0 +1,16 @@
+[project]
+name = "av1-learning"
+version = "0.1.0"
+description = "AV1 bitstream learning project"
+requires-python = ">=3.8"
+dependencies = [
+    "pytest>=8.3.5",
+]
+
+[tool.pyright]
+# 配置 Pyright/Pylance 的 Python 路径
+# 将 src 目录添加到 Python 路径中，以便 IDE 可以正确解析导入
+extraPaths = ["src"]
+# 报告缺失的导入
+reportMissingImports = true
+

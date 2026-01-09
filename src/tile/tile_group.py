@@ -3,7 +3,7 @@ Tile组OBU解析器
 按照规范文档5.11节实现tile_group_obu()
 """
 
-from constants import FRAME_LF_COUNT, FRAME_RESTORATION_TYPE, GM_TYPE, INTERPOLATION_FILTER, MAX_REF_MV_STACK_SIZE, MAX_TILE_COLS, MAX_TILE_ROWS, NONE, NUM_REF_FRAMES, PALETTE_COLORS, PLANE_MAX, REF_FRAME, SUB_SIZE, WIENER_COEFFS, Y_MODE
+from constants import FILTER_INTRA_MODE, FRAME_LF_COUNT, FRAME_RESTORATION_TYPE, GM_TYPE, INTERPOLATION_FILTER, MAX_REF_MV_STACK_SIZE, MAX_TILE_COLS, MAX_TILE_ROWS, NONE, NUM_REF_FRAMES, PALETTE_COLORS, PLANE_MAX, REF_FRAME, SUB_SIZE, WIENER_COEFFS, Y_MODE
 from typing import List, Optional
 from copy import deepcopy
 from typing import List
@@ -128,7 +128,7 @@ class TileGroup:
 
         self.use_filter_intra: Optional[int] = None
 
-        self.filter_intra_mode: int = NONE
+        self.filter_intra_mode: FILTER_INTRA_MODE = NONE
 
         self.RefFrame: List[REF_FRAME] = [NONE, NONE]
 
@@ -1433,7 +1433,7 @@ class TileGroupParser:
                 max(Block_Width[MiSize], Block_Height[MiSize]) <= 32):
             tile_group.use_filter_intra = read_S(av1, 'use_filter_intra')
             if tile_group.use_filter_intra:
-                tile_group.filter_intra_mode = read_S(av1, 'filter_intra_mode')
+                tile_group.filter_intra_mode = FILTER_INTRA_MODE(read_S(av1, 'filter_intra_mode'))
 
     def __read_ref_frames(self, av1: AV1Decoder):
         """

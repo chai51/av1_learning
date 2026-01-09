@@ -186,7 +186,7 @@ class Prediction:
         elif is_directional_mode(mode):
             pred = self._directional_intra_prediction_process(
                 av1, plane, x, y, haveLeft, haveAbove, mode, w, h, maxX, maxY)
-        elif mode == Y_MODE.SMOOTH_PRED or mode == Y_MODE.SMOOTH_V_PRED or mode == Y_MODE.SMOOTH_H_PRED:
+        elif mode in [Y_MODE.SMOOTH_PRED, Y_MODE.SMOOTH_V_PRED, Y_MODE.SMOOTH_H_PRED]:
             pred = self._smooth_intra_prediction_process(
                 av1, mode, log2W, log2H, w, h)
         elif mode == Y_MODE.DC_PRED:

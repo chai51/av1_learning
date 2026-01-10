@@ -340,14 +340,6 @@ size = read_leb128(reader)  # 读取LEB128编码的值
 uv run pytest
 ```
 
-## 开发进度
-
-详细开发进度请参考 [ROADMAP.md](ROADMAP.md)
-
-## 架构设计
-
-详细架构设计请参考 [ARCHITECTURE.md](ARCHITECTURE.md)
-
 ## 学习资源
 
 - [AV1规范文档](https://aomediacodec.github.io/av1-spec/) - 官方AV1规范
@@ -384,8 +376,3 @@ A: 可以使用 `ffmpeg` 或其他工具将视频编码为 AV1 格式，或从�
 
 如果发现 bug 或有改进建议，请在项目的 Issues 页面中提交。
 
-## 许可证
-
-本项目仅用于学习和教育目的。代码实现遵循 AV1 规范文档的许可证要求。
-
-**注意**：本项目是学习性质的实现，不应用于生产环境。AV1 规范文档和相关参考实现（如 libaom）的许可证要求请参考各自的官方文档。

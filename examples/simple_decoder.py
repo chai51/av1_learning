@@ -284,16 +284,16 @@ def decode_av1_file(ivf_file: str, verbose: bool = True):
     
     # 3. 解析每帧的AV1比特流
     av1Decoder = AV1Decoder()
-    av1Dump = Av1Dump(ivf_file + '.dump')
-    seq_header = None
 
-    av1Decoder.on_cdf = av1Dump.on_cdf
-    av1Decoder.on_symbol = av1Dump.on_symbol
-    av1Decoder.on_wmmat = av1Dump.on_wmmat
-    av1Decoder.on_pred = av1Dump.on_pred
-    av1Decoder.on_pred_frame = av1Dump.on_pred_frame
-    av1Decoder.on_residual_frame = av1Dump.on_residual_frame
-    av1Decoder.on_film_grain_frame = av1Dump.on_film_grain_frame
+    # dump信息校验
+    # av1Dump = Av1Dump(ivf_file + '.dump')
+    # av1Decoder.on_cdf = av1Dump.on_cdf
+    # av1Decoder.on_symbol = av1Dump.on_symbol
+    # av1Decoder.on_wmmat = av1Dump.on_wmmat
+    # av1Decoder.on_pred = av1Dump.on_pred
+    # av1Decoder.on_pred_frame = av1Dump.on_pred_frame
+    # av1Decoder.on_residual_frame = av1Dump.on_residual_frame
+    # av1Decoder.on_film_grain_frame = av1Dump.on_film_grain_frame
     
     for frame_idx, frame in enumerate(frames):
         if verbose:
